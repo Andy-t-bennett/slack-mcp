@@ -1,0 +1,6 @@
+# Slack MCP Server Configuration
+# Copy this file to config.yaml and fill in your actual values
+
+user_token: "xoxp-your-slack-user-token-here"
+users: {}
+channels: {} 
