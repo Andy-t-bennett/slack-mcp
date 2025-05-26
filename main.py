@@ -11,16 +11,22 @@ config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
 
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 
-if os.path.exists(config_path):
-    with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
-    
-    # Get user token from config once for reuse
-    token = config["user_token"]
-    
-    # Create Slack client once for reuse
-    client = WebClient(token=token, ssl=ssl_context)
-    
+# Initialize client as None - will be set up when config is loaded
+client = None
+
+try:
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as file:
+            config = yaml.safe_load(file)
+        
+        # Get user token from config once for reuse
+        token = config["user_token"]
+        
+        # Create Slack client once for reuse
+        client = WebClient(token=token, ssl=ssl_context)
+except Exception as e:
+    # Server can still start without config - setup will handle this
+    print(f"Warning: Could not load config on startup: {e}", file=sys.stderr)
 
 mcp = FastMCP("slack")
 
@@ -66,23 +72,21 @@ def send_message_to_user(user_name: str, message: str) -> str:
     Send a direct message to a user in Slack.
     
     Args:
-        user_name: The name of the user to send the message to (e.g., "andy")
+        user_name: The name of the user to send the message to (e.g., "andy", "Andy Bennett", "abennett1297")
         message: The text content of the message to send
         
     Returns:
         str: A confirmation message if successful, or an error message if the send failed
     """
-    try:        
-        # Reload config to get latest data
-        with open(config_path, 'r') as file:
-            current_config = yaml.safe_load(file)
+    try:
+        # Check if client is initialized
+        if client is None:
+            return "Slack not configured. Please ask me to setup slack and provide your user token."
         
-        # Get user ID from the config
-        user_name = user_name.lower()
-        if user_name not in current_config["users"]:
+        # Use the new user lookup function
+        user_id = _get_slack_user(user_name)
+        if user_id is None:
             return f"Error: User '{user_name}' not found in config"
-        
-        user_id = current_config["users"][user_name]
         
         # Send direct message to user (use user_id as channel)
         response = client.chat_postMessage(
@@ -98,18 +102,23 @@ def send_message_to_user(user_name: str, message: str) -> str:
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def send_message_to_channel(channel_name: str, message: str) -> str:
+def send_message_to_channel(channel_name: str, message: str, users: list[str] = None) -> str:
     """
-    Send a message to a channel in Slack.
+    Send a message to a channel in Slack, optionally mentioning specific users.
     
     Args:
         channel_name: The name of the channel to send the message to (e.g., "mcp-server")
         message: The text content of the message to send
+        users: Optional list of user names to mention (e.g., ["andy", "alec"])
         
     Returns:
         str: A confirmation message if successful, or an error message if the send failed
     """
-    try:        
+    try:
+        # Check if client is initialized
+        if client is None:
+            return "Slack not configured. Please ask me to setup slack and provide your user token."
+        
         # Reload config to get latest data
         with open(config_path, 'r') as file:
             current_config = yaml.safe_load(file)
@@ -120,22 +129,77 @@ def send_message_to_channel(channel_name: str, message: str) -> str:
             return f"Error: Channel '{channel_name}' not found in config"
         
         channel_id = current_config["channels"][channel_name]
+
+        # Build mentions if users are specified
+        mentions = []
+        if users:
+            for user in users:
+                user_id = _get_slack_user(user)
+                if user_id:
+                    mentions.append(f"<@{user_id}>")
+                else:
+                    return f"Error: User '{user}' not found in config"
+        
+        # Construct final message with mentions at the beginning
+        if mentions:
+            final_message = f"{' '.join(mentions)} {message}"
+        else:
+            final_message = message
         
         # Send message to channel
         response = client.chat_postMessage(
             channel=channel_id,
-            text=message
+            text=final_message
         )
         
         if response["ok"]:
-            return f"Message sent successfully to #{channel_name}!"
+            mentioned_users_str = f" (mentioning {', '.join(users)})" if users else ""
+            return f"Message sent successfully to #{channel_name}!{mentioned_users_str}"
         else:
             return f"Error: {response['error']}"
     except Exception as e:
         return f"Error: {str(e)}"
 
+def _get_slack_user(name: str) -> str:
+    """
+    Find a Slack user by various identifiers (username, display name, real name, etc.)
+    
+    Args:
+        name: The name to search for (can be username, display name, real name, etc.)
+        
+    Returns:
+        str: The user ID if found, None if not found
+    """
+    try:
+        # Reload config to get latest data
+        with open(config_path, 'r') as file:
+            current_config = yaml.safe_load(file)
+        
+        if "users" not in current_config:
+            return None
+            
+        name_lower = name.lower()
+        
+        # Search through all users for a match
+        for user_data in current_config["users"].values():
+            # Check all possible name fields
+            if (user_data.get("username", "").lower() == name_lower or
+                user_data.get("display_name", "").lower() == name_lower or
+                user_data.get("real_name", "").lower() == name_lower or
+                user_data.get("first_name", "").lower() == name_lower):
+                return user_data["id"]
+        
+        return None
+    
+    except Exception as e:
+        return None
+
 def _get_channel_ids():
     try:
+        # Check if client is initialized
+        if client is None:
+            return "Error: Slack client not initialized"
+        
         # Reload config from file to get latest data
         with open(config_path, 'r') as file:
             current_config = yaml.safe_load(file)
@@ -174,6 +238,10 @@ def _get_channel_ids():
 
 def _get_user_ids():
     try:
+        # Check if client is initialized
+        if client is None:
+            return "Error: Slack client not initialized"
+        
         # Reload config from file to get latest data
         with open(config_path, 'r') as file:
             current_config = yaml.safe_load(file)
@@ -191,13 +259,27 @@ def _get_user_ids():
             for user in response["members"]:
                 # Skip bots and deleted users
                 if not user.get("is_bot", False) and not user.get("deleted", False):
-                    name = user.get("name", "")
+                    username = user.get("name", "")
                     user_id = user.get("id", "")
                     
-                    # Check if user already exists in config
-                    if name.lower() not in current_config["users"]:
-                        # Add new user to config
-                        current_config["users"][name.lower()] = user_id
+                    # Get profile information
+                    profile = user.get("profile", {})
+                    display_name = profile.get("display_name", "")
+                    real_name = profile.get("real_name", "")
+                    first_name = profile.get("first_name", "")
+                    
+                    # Create comprehensive user object
+                    user_data = {
+                        "id": user_id,
+                        "username": username,
+                        "display_name": display_name,
+                        "real_name": real_name,
+                        "first_name": first_name
+                    }
+                    
+                    # Use username as the key, but store full user data
+                    if username.lower() not in current_config["users"]:
+                        current_config["users"][username.lower()] = user_data
                         new_users_added += 1
             
             # Write updated config back to file
